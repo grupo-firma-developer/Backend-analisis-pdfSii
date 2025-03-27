@@ -38,7 +38,8 @@ for folder in [PDF_SIN_ANALIZAR, PDF_ANALIZADOS, EXCELS_GENERADOS, PDF_GENERADOS
     folder.mkdir(parents=True, exist_ok=True)
 
 # Expresiones regulares
-pattern_periodo = re.compile(r"PERIODO\s+(\d{2}\s\d{2}\s/\s\d{4})")
+#pattern_periodo = re.compile(r"PERIODO\s+(\d{2}\s\d{2}\s/\s\d{4})")
+pattern_periodo = re.compile(r"PERIODO\s+\d{2}\s(\d{2}\s/\s\d{4})")
 pattern_142 = re.compile(r"VENTAS Y/O SERV. EXENTOS O NO\s[^\d\-−]*([\-−]?[\d,.]+)")
 pattern_537 = re.compile(r"TOTAL CRÉDITOS\s[^\d\-−]*([\-−]?[\d,.]+)")
 pattern_538 = re.compile(r"TOTAL DÉBITOS\s[^\d\-−]*([\-−]?[\d,.]+)")
@@ -113,6 +114,15 @@ def procesar_pdf(filename: str):
                     })
     
     df = pd.DataFrame(datos)
+
+    df.replace(["N/A", "NaN", None, pd.NA], 0, inplace=True)
+
+    columnas_a_formatear = ["Ventas Netas", "Compras Netas", "Ventas Netas M$", "Compras Netas M$", "Margen"]
+
+    for col in columnas_a_formatear:
+        if col in df.columns and pd.api.types.is_numeric_dtype(df[col]):
+            df[col] = df[col].apply(lambda x: f"$ {int(x):,}".replace(",", ".") if pd.notna(x) else x)
+
     excel_filename = filename.replace(".pdf", ".xlsx")
     excel_path = EXCELS_GENERADOS / excel_filename
     df.to_excel(excel_path, sheet_name="Datos", index=False)
@@ -148,6 +158,8 @@ def descargar_pdf(filename: str):
     try:
         df = pd.read_excel(excel_path)
 
+        df.replace(["N/A", "NaN", None, pd.NA], 0, inplace=True)
+
         columnas_a_redondear = [
             "Ventas Netas",
             "Compras Netas",
@@ -158,7 +170,7 @@ def descargar_pdf(filename: str):
 
         for col in columnas_a_redondear:
             if col in df.columns and pd.api.types.is_numeric_dtype(df[col]):
-                df[col] = df[col].apply(lambda x: round(x, 2) if pd.notna(x) else x)
+                df[col] = df[col].apply(lambda x: f"${int(x):,}".replace(",",".") if pd.notna(x) else x)
 
         pdf_path_str = str(pdf_path)
 
