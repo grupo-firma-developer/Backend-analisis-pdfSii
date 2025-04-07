@@ -1,10 +1,11 @@
 from tkinter.font import Font
+import traceback
 from fastapi import FastAPI, Response, UploadFile, File
 import shutil
 import os
-from openpyxl import Workbook
+from openpyxl import Workbook, load_workbook
 from openpyxl.utils.dataframe import dataframe_to_rows
-from openpyxl.styles import Font, Color, NamedStyle
+from openpyxl.styles import Font, Color, NamedStyle, Alignment
 from openpyxl.utils import get_column_letter
 from openpyxl.formatting.rule import CellIsRule
 import pdfplumber
@@ -17,7 +18,8 @@ from reportlab.pdfgen import canvas
 import pdfkit
 from fpdf import FPDF
 from reportlab.lib.pagesizes import letter
-from reportlab.platypus import SimpleDocTemplate, Table, TableStyle
+from reportlab.lib.styles import getSampleStyleSheet
+from reportlab.platypus import SimpleDocTemplate, Table, TableStyle, Paragraph, Spacer
 from reportlab.lib import colors
 from reportlab.lib.pagesizes import letter, landscape  
 from datetime import datetime
@@ -44,8 +46,11 @@ PDF_GENERADOS = BASE_DIR / "pdfs_generados"
 for folder in [PDF_SIN_ANALIZAR, PDF_ANALIZADOS, EXCELS_GENERADOS, PDF_GENERADOS]:
     folder.mkdir(parents=True, exist_ok=True)
 
+
 # Expresiones regulares
-#pattern_periodo = re.compile(r"PERIODO\s+(\d{2}\s\d{2}\s/\s\d{4})")
+
+#NOMBRE EMPRESA
+razon_social = re.compile(r"Nombre del emisor:\s*(.+)")
 pattern_periodo = re.compile(r"PERIODO\s+\d{2}\s(\d{2}\s/\s\d{4})")
 pattern_142 = re.compile(r"VENTAS Y/O SERV. EXENTOS O NO\s[^\d\-−]*([\-−]?[\d,.]+)")
 pattern_537 = re.compile(r"TOTAL CRÉDITOS\s[^\d\-−]*([\-−]?[\d,.]+)")
@@ -73,10 +78,17 @@ def procesar_pdf(filename: str):
         return {"error": "Archivo no encontrado"}
 
     datos = []
+    nombre_emisor = "Sin Razon Social"
     with pdfplumber.open(pdf_path) as pdf:
         for page in pdf.pages:
             text = page.extract_text()
+            if nombre_emisor == "Sin Razon Social":
+                match_razon = razon_social.search(text)
+                if match_razon:
+                    nombre_emisor = match_razon.group(1).strip()
+
             if text:
+               
                 match_periodo = pattern_periodo.search(text)
                 periodo_str = match_periodo.group(1) if match_periodo else "Sin Periodo"
 
@@ -103,6 +115,7 @@ def procesar_pdf(filename: str):
                         margen = ventas_netas - compras_netas
 
                         datos.append({
+                            
                             "PERIODO": periodo_str,
                             "538": valores_538[i],
                             "537": valores_537[i],
@@ -128,11 +141,11 @@ def procesar_pdf(filename: str):
 
         df = pd.DataFrame(datos)
 
+
         # Convertir la columna 'PERIODO' a formato datetime para ordenar y extraer el año
         df["Fecha_Ordenable"] = df["PERIODO"].apply(lambda x: datetime.strptime(x, "%m / %Y") if x != "Sin Periodo" else datetime(1900, 1, 1))
         df["Anio"] = df["Fecha_Ordenable"].dt.year
 
-        # Ordenar por la fecha extraída
         df = df.sort_values(by="Fecha_Ordenable")
 
         # Realizar el cálculo de ventas netas acumuladas reiniciando por año
@@ -150,10 +163,10 @@ def procesar_pdf(filename: str):
                 df.loc[index, "Ventas Netas Acumuladas"] = acumulado
             else:
                 df.loc[index, "Ventas Netas Acumuladas"] = "Error"
-                acumulado = "Error" # Si un valor es error, la acumulación se detiene para el resto del año
+                acumulado = "Error" 
 
 
-        df["Variación Acumulada"] = None  # Cambio de nombre de columna
+        df["Variación Acumulada"] = None  
 
         for anio in df["Anio"].unique():
             anio_anterior = anio - 1
@@ -166,23 +179,19 @@ def procesar_pdf(filename: str):
                     fecha_actual = row["Fecha_Ordenable"]
                     vna_actual = row["Ventas Netas Acumuladas"]
 
-                    # Buscar el mismo mes en el año anterior
                     df_mes_anterior = df_anio_anterior[df_anio_anterior["Fecha_Ordenable"].dt.month == fecha_actual.month]
 
                     if not df_mes_anterior.empty:
-                        vna_anio_anterior = df_mes_anterior["Ventas Netas Acumuladas"].iloc[-1]  # Último valor del mes
+                        vna_anio_anterior = df_mes_anterior["Ventas Netas Acumuladas"].iloc[-1]  
 
                         if isinstance(vna_anio_anterior, (int, float)) and vna_anio_anterior != 0:
                             variacion = ((vna_actual - vna_anio_anterior) / vna_anio_anterior) 
-                            df.loc[index, "Variación Acumulada"] = round(variacion, 4)  # Redondeamos a 4 decimales
+                            df.loc[index, "Variación Acumulada"] = round(variacion, 4)  
 
-        # Eliminar columnas auxiliares
         df.drop(columns=["Fecha_Ordenable", "Anio"], inplace=True)
 
-        # Reemplazar valores NaN o nulos con 0
         df.replace(["N/A", "NaN", None, pd.NA], 0, inplace=True)
 
-        # Formatear columnas monetarias correctamente
         columnas_a_formatear = [
             "Ventas Netas", "Compras Netas", "Ventas Netas M$", 
             "Compras Netas M$", "Margen", "Ventas Netas Acumuladas"
@@ -192,35 +201,37 @@ def procesar_pdf(filename: str):
             if col in df.columns and pd.api.types.is_numeric_dtype(df[col]):
                 df[col] = df[col].apply(lambda x: f"$ {int(x):,}".replace(",", ".") if pd.notna(x) else x)
                 
-        # Guardar en Excel
-        excel_filename = filename.replace(".pdf", ".xlsx")
+        excel_filename = f"{nombre_emisor.replace(' ', '_').replace('/', '_')}.xlsx"
         excel_path = EXCELS_GENERADOS / excel_filename
 
-        # Crear un nuevo archivo Excel
         wb = Workbook()
         ws = wb.active
+        
+        # Unir las celdas de la A1 a la D1
+        ws.merge_cells("A1:D1")
 
-        # Escribir los datos en el archivo Excel
-        for r_idx, row in enumerate(dataframe_to_rows(df, header=True, index=False)):
-            ws.append(row)
+        ws["A1"] = f"Razón Social: {nombre_emisor}"
+      
+        ws["A1"].alignment = Alignment(horizontal="center")
+        ws["A1"].font = Font(bold=True)
 
-        # Obtener la columna de "Variación Acumulada"
+        for r_idx, row in enumerate(dataframe_to_rows(df, header=True, index=False), start=3):
+            for c_idx, value in enumerate(row, start=1):
+                ws.cell(row=r_idx, column=c_idx, value=value)
+
+
         col_index = df.columns.get_loc("Variación Acumulada") + 1
-        col_letter = get_column_letter(col_index)  # Obtener letra de la columna
-
-        # Estilo para mostrar porcentajes sin decimales
+        col_letter = get_column_letter(col_index)  
         percent_style = NamedStyle(name="percentage_no_decimals")
-        percent_style.number_format = "0%"  # Formato sin decimales
+        percent_style.number_format = "0%"  
         wb.add_named_style(percent_style)
 
-        # Aplicar estilo a la columna de "Variación Acumulada"
         for row in ws.iter_rows(min_row=2, max_row=ws.max_row, min_col=col_index, max_col=col_index):
             for cell in row:
                 cell.style = percent_style
 
-        # Agregar formato condicional
-        green_font = Font(color="008000")  # Verde para valores positivos
-        red_font = Font(color="FF0000")  # Rojo para valores negativos
+        green_font = Font(color="008000") 
+        red_font = Font(color="FF0000")  
 
         rule_green = CellIsRule(operator='greaterThan', formula=['0'], font=green_font)
         rule_red = CellIsRule(operator='lessThan', formula=['0'], font=red_font)
@@ -228,7 +239,20 @@ def procesar_pdf(filename: str):
         ws.conditional_formatting.add(f'{col_letter}2:{col_letter}{ws.max_row}', rule_green)
         ws.conditional_formatting.add(f'{col_letter}2:{col_letter}{ws.max_row}', rule_red)
 
-        # Guardar el archivo con formato
+        for col_idx, col in enumerate(ws.columns, start=1):
+            max_length = 0
+            col_letter = get_column_letter(col_idx)  # Obtener la letra de la columna
+
+            for cell in col:
+                try:
+                    if cell.value:
+                        max_length = max(max_length, len(str(cell.value)))
+                except:
+                    pass
+
+            adjusted_width = max_length + 2  # Ajustar con un margen adicional
+            ws.column_dimensions[col_letter].width = adjusted_width
+
         wb.save(excel_path)
         wb.close()
  
@@ -254,81 +278,101 @@ def descargar_excel(filename: str):
 
 @app.get("/descargar_pdf/{filename}")
 def descargar_pdf(filename: str):
-    excel_path = EXCELS_GENERADOS / filename
+    excel_filename = filename 
+    excel_path = EXCELS_GENERADOS / excel_filename
     if not excel_path.exists():
-        return {"error": "Archivo Excel no encontrado"}
+        return Response(content='{"error": "Archivo Excel no encontrado"}', status_code=404, media_type="application/json")
 
-    pdf_filename = filename.replace(".xlsx", ".pdf")
+    pdf_filename = excel_filename.replace(".xlsx", ".pdf")
     pdf_path =  PDF_GENERADOS / pdf_filename
+    pdf_path_str = str(pdf_path) # Convertir a string para ReportLab
 
     try:
-        # Leer el archivo Excel y procesarlo
-        df = pd.read_excel(excel_path)
+        nombre_empresa = "Nombre no encontrado" 
+        try:
+            wb = load_workbook(excel_path)
+            sheet = wb.active
 
-        # Reemplazar valores NaN o nulos con 0
-        df.replace(["N/A", "NaN", None, pd.NA], 0, inplace=True)
+            cell_value = sheet['A1'].value
+            if isinstance(cell_value, str) and cell_value.startswith("Razón Social: "):
+                nombre_empresa = cell_value.split("Razón Social: ", 1)[1]
+            elif isinstance(cell_value, str): 
+                 nombre_empresa = cell_value
+            wb.close()
+        except Exception as e_openpyxl:
+            print(f"Advertencia: No se pudo leer la Razón Social desde la celda A1: {e_openpyxl}")
+            nombre_empresa = excel_filename.replace(".xlsx", "").replace("_", " ")
 
-        # Formatear la columna de "Variación Acumulada" como entero en porcentaje
+        df = pd.read_excel(excel_path, header=2)
+
+        df.fillna(0, inplace=True) 
+
+        # Función de formato de porcentaje
         def format_percentage(x):
             if isinstance(x, (int, float)):
                 return f"{int(round(x * 100))}%"
-            return x
+            return str(x) 
 
-        df["Variación Acumulada"] = df["Variación Acumulada"].apply(format_percentage)
+        col_var_acum = 'Variación Acumulada'
+        if col_var_acum in df.columns:
+            col_var_acum_num = col_var_acum + "_Num"
+            # Convertir a numérico, los errores se vuelven NaN, luego llenar con 0
+            df[col_var_acum_num] = pd.to_numeric(df[col_var_acum], errors='coerce').fillna(0)
+            # Formatear la columna original (la que se mostrará) usando la numérica
+            df[col_var_acum] = df[col_var_acum_num].apply(format_percentage)
+        else:
+            print(f"Advertencia: La columna '{col_var_acum}' no se encontró en el DataFrame.")
+            col_var_acum_num = None 
 
-        # Usar orientación horizontal (landscape)
-        pdf_path_str = str(pdf_path)
-        doc = SimpleDocTemplate(pdf_path_str, pagesize=landscape(letter))
+        styles = getSampleStyleSheet()
+        title_style = styles['h1']
+        title_style.alignment = 1 
 
-        # Preparar los datos para la tabla
-        table_data = [df.columns.tolist()] + df.values.tolist()
+        titulo = Paragraph(f"Razón social: {nombre_empresa}", title_style)
 
-        # Ajustar los anchos de las columnas según sea necesario
-        col_widths = [60, 60, 60, 60]  # Ajustar estos valores según el contenido
+        espacio = Spacer(1, 20) 
 
-        table = Table(table_data, colWidths=col_widths)
+        df_display = df.drop(columns=[col_var_acum_num], errors='ignore') 
+        table_data = [df_display.columns.tolist()] + df_display.values.tolist()
 
-        # Establecer el estilo base para la tabla
-        base_style = TableStyle([
-            ('BACKGROUND', (0, 0), (-1, 0), colors.grey),
-            ('TEXTCOLOR', (0, 0), (-1, 0), colors.whitesmoke),
-            ('ALIGN', (0, 0), (-1, -1), 'CENTER'),
-            ('FONTNAME', (0, 0), (-1, 0), 'Helvetica-Bold'),
-            ('BOTTOMPADDING', (0, 0), (-1, 0), 8),
-            ('BACKGROUND', (0, 1), (-1, -1), colors.beige),
-            ('GRID', (0, 0), (-1, -1), 1, colors.black),
-            ('FONTSIZE', (0, 0), (-1, -1), 6),
-            ('WORDSPACE', (0, 0), (-1, -1), 0.2),
-            ('ALIGN', (0, 0), (-1, -1), 'CENTER'),
-            ('VALIGN', (0, 0), (-1, -1), 'MIDDLE'),
+        tabla = Table(table_data) 
+
+        estilo_base_tabla = TableStyle([
+            ('BACKGROUND', (0, 0), (-1, 0), colors.grey),         # Fondo cabecera
+            ('TEXTCOLOR', (0, 0), (-1, 0), colors.whitesmoke),    # Color texto cabecera
+            ('ALIGN', (0, 0), (-1, -1), 'CENTER'),                # Alineación general
+            ('VALIGN', (0, 0), (-1, -1), 'MIDDLE'),               # Alineación vertical
+            ('FONTNAME', (0, 0), (-1, 0), 'Helvetica-Bold'),      # Fuente cabecera
+            ('BOTTOMPADDING', (0, 0), (-1, 0), 10),               # Padding cabecera
+            ('BACKGROUND', (0, 1), (-1, -1), colors.beige),       # Fondo datos
+            ('GRID', (0, 0), (-1, -1), 1, colors.black),          # Bordes
+            ('FONTSIZE', (0, 0), (-1, -1), 7),                    # Tamaño fuente general (ajusta según necesites)
         ])
-        table.setStyle(base_style)
+        tabla.setStyle(estilo_base_tabla)
 
-        # Establecer color condicional para la columna "Variación Acumulada" con un nuevo TableStyle
         color_styles = []
-        var_col_idx = df.columns.get_loc("Variación Acumulada")  # Encontrar el índice de la columna (sin el +1 para el encabezado)
-        for row_idx in range(1, len(table_data)):  # Empezar desde la fila 1 (sin el encabezado)
-            var_value_str = str(table_data[row_idx][var_col_idx])  # Obtener el valor de la columna como string
-            if var_value_str.startswith("-"):  # Si es negativo
+        var_col_idx = df.columns.get_loc("Variación Acumulada")  
+        for row_idx in range(1, len(table_data)):  
+            var_value_str = str(table_data[row_idx][var_col_idx]) 
+            if var_value_str.startswith("-"):  
                 color_styles.append(('TEXTCOLOR', (var_col_idx, row_idx), (var_col_idx, row_idx), colors.red))
-            elif not var_value_str.startswith("-"):  # Si es positivo o cero
+            elif not var_value_str.startswith("-"): 
                 color_styles.append(('TEXTCOLOR', (var_col_idx, row_idx), (var_col_idx, row_idx), colors.green))
 
-        table.setStyle(TableStyle(color_styles))
+        tabla.setStyle(TableStyle(color_styles))
 
-        # Construir y generar el documento PDF
-        elements = [table]
-        doc.build(elements)
+        doc = SimpleDocTemplate(pdf_path_str, pagesize=landscape(letter))
 
-        # Leer el archivo PDF generado y devolverlo
-        with open(pdf_path_str, "rb") as f:
-            pdf_data = f.read()
+        elementos = [titulo, espacio, tabla] 
+        
+        doc.build(elementos)
 
-        return Response(
-            content=pdf_data,
+        return FileResponse(
+            path=pdf_path_str,
             media_type="application/pdf",
-            headers={"Content-Disposition": f"attachment; filename={pdf_filename}"}
+            filename=pdf_filename 
         )
 
     except Exception as e:
-        return {"error": f"Error procesando el PDF: {str(e)}"}
+        return Response(content='{"error": "Ocurrió un error interno al generar el PDF"}', status_code=500, media_type="application/json")
+
